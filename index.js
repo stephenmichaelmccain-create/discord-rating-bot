@@ -5,13 +5,16 @@ const {
   DISCORD_TOKEN,
   GUILD_ID,
   SOURCE_CHANNEL_ID,
-  PROCESSED_CHANNEL_ID,
   N8N_SOURCE_WEBHOOK_URL,
-  N8N_RATING_WEBHOOK_URL,
 } = process.env;
 
 if (!DISCORD_TOKEN) {
   console.error("❌ DISCORD_TOKEN is not set. Please add it as an environment variable.");
+  process.exit(1);
+}
+
+if (!N8N_SOURCE_WEBHOOK_URL) {
+  console.error("❌ N8N_SOURCE_WEBHOOK_URL is not set. Please add it as an environment variable.");
   process.exit(1);
 }
 
@@ -20,11 +23,10 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMembers, // only needed because we send member/roles info
   ],
-  partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User, Partials.GuildMember],
+  partials: [Partials.Message, Partials.Channel, Partials.User, Partials.GuildMember],
 });
 
 // Utility: build a Discord message URL
@@ -40,11 +42,6 @@ function logDebug(label, obj) {
 
 // Utility: POST JSON helper
 async function postJSON(url, body) {
-  if (!url) {
-    console.warn("⚠️ Tried to POST to empty url. Skipping.");
-    return;
-  }
-
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -66,24 +63,18 @@ client.once("ready", (c) => {
   console.log(`✅ Bot logged in as ${c.user.tag}`);
   if (GUILD_ID) console.log(`🔗 Restricted to guild: ${GUILD_ID}`);
   if (SOURCE_CHANNEL_ID) console.log(`📥 Source channel: ${SOURCE_CHANNEL_ID}`);
-  if (PROCESSED_CHANNEL_ID) console.log(`📤 Rating channel: ${PROCESSED_CHANNEL_ID}`);
 });
 
 // ----- MESSAGE HANDLER (SOURCE → N8N_SOURCE_WEBHOOK_URL) -----
 client.on("messageCreate", async (message) => {
   try {
-    if (message.author.bot) return;
+    // ✅ includes BOTH humans and bots (no bot filter)
 
     // Filter by guild if GUILD_ID is set
     if (GUILD_ID && message.guildId && message.guildId !== GUILD_ID) return;
 
     // Filter by specific channel if provided
     if (SOURCE_CHANNEL_ID && message.channelId !== SOURCE_CHANNEL_ID) return;
-
-    if (!N8N_SOURCE_WEBHOOK_URL) {
-      console.warn("⚠️ N8N_SOURCE_WEBHOOK_URL not set, skipping source message forwarding.");
-      return;
-    }
 
     const payload = {
       type: "source_message",
@@ -96,6 +87,7 @@ client.on("messageCreate", async (message) => {
         username: message.author.username,
         discriminator: message.author.discriminator,
         tag: message.author.tag,
+        bot: message.author.bot,
       },
       member: message.member
         ? {
@@ -117,88 +109,10 @@ client.on("messageCreate", async (message) => {
       createdTimestamp: message.createdTimestamp,
     };
 
-    logDebug("📨 Forwarding source message → n8n", { id: message.id });
+    logDebug("📨 Forwarding message → n8n", { id: message.id, bot: message.author.bot });
     await postJSON(N8N_SOURCE_WEBHOOK_URL, payload);
   } catch (err) {
     console.error("❌ Error in messageCreate handler:", err);
-  }
-});
-
-// ----- REACTION HANDLER (RATINGS → N8N_RATING_WEBHOOK_URL) -----
-const ratingEmojiMap = {
-  "1️⃣": 1,
-  "2️⃣": 2,
-  "3️⃣": 3,
-  "4️⃣": 4,
-  // optional plain numbers
-  "1": 1,
-  "2": 2,
-  "3": 3,
-  "4": 4,
-};
-
-client.on("messageReactionAdd", async (reaction, user) => {
-  try {
-    if (user.bot) return;
-
-    if (reaction.partial) {
-      try {
-        await reaction.fetch();
-      } catch (err) {
-        console.error("❌ Failed to fetch partial reaction:", err);
-        return;
-      }
-    }
-
-    const message = reaction.message;
-
-    // Filter by guild and processed channel
-    if (GUILD_ID && message.guildId && message.guildId !== GUILD_ID) return;
-    if (PROCESSED_CHANNEL_ID && message.channelId !== PROCESSED_CHANNEL_ID) return;
-
-    const emojiKey = reaction.emoji.name;
-    const rating = ratingEmojiMap[emojiKey];
-    if (!rating) return; // ignore non-rating reactions
-
-    if (!N8N_RATING_WEBHOOK_URL) {
-      console.warn("⚠️ N8N_RATING_WEBHOOK_URL not set, skipping rating forwarding.");
-      return;
-    }
-
-    const payload = {
-      type: "rating",
-      messageId: message.id,
-      channelId: message.channelId,
-      guildId: message.guildId ?? null,
-      url: buildMessageUrl(message),
-      rater: {
-        id: user.id,
-        username: user.username,
-        discriminator: user.discriminator,
-        tag: `${user.username}#${user.discriminator}`,
-      },
-      rating,
-      emoji: emojiKey,
-      originalAuthor: message.author
-        ? {
-            id: message.author.id,
-            username: message.author.username,
-            discriminator: message.author.discriminator,
-            tag: message.author.tag,
-          }
-        : null,
-      originalContent: message.content,
-      createdTimestamp: Date.now(),
-    };
-
-    logDebug("⭐ Forwarding rating → n8n", {
-      rating,
-      messageId: message.id,
-      userId: user.id,
-    });
-    await postJSON(N8N_RATING_WEBHOOK_URL, payload);
-  } catch (err) {
-    console.error("❌ Error in messageReactionAdd handler:", err);
   }
 });
 
@@ -209,3 +123,4 @@ client
     console.error("❌ Login failed:", err);
     process.exit(1);
   });
+
